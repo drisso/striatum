@@ -19,6 +19,8 @@ library(scone)
 library(stringi)
 library(RColorBrewer)
 library(clusterExperiment)
+library(Rtsne)
+library(matrixStats)
 
 cols <- c(brewer.pal(9, "Set1"))
 
@@ -139,12 +141,12 @@ plot(qc[,c(1, 3)], pch=19, col=cols[batch])
 # Normalization
 
 Here, we normalize the samples by removing the batch effects and the first two QC PCs,
-after FQ normalization
+after FQ normalization.
 
 
 ```{r norm}
 Y <- t(log1p(fq))
-W <- model.matrix(~batch + qcpca$x[,1:2])
+W <- model.matrix(~batch)
 alpha <- solve(t(W) %*% W) %*% t(W) %*% Y
 correctedY <- t(Y - W %*% alpha)
 #correctedY[correctedY<0] <- 0
@@ -162,360 +164,76 @@ plotHeatmap(log1p(fq[poscon,]))
 plotHeatmap(correctedY[poscon,])
 ```
 
-----> HERE <----
-
 # Clustering
 
-```{r tightcluster, eval=evalTight}
-minSize<-10
-mkFullClMat<-function(obj,rev=TRUE){ #little function for making clMat from the tightTracking output
-  if(rev) obj$clMat<-rev(obj$clMat)
-	clMat<-do.call("cbind",obj$clMat) 
-	names(clMat)<-unlist(lapply(names(obj$clMat),function(x){paste(x,gsub("[.]","=",colnames(obj$clMat[[1]])),sep=",")}))
-	return(clMat)
-}
+```{r tightcluster}
+seed <- 927501
 
-seed<-927501
-beta<-0.9
-ncores<-4
+rsec <- RSEC(fq, isCount = TRUE, minSizes = 5, alphas = 0.3,
+             combineProportion = 0.5,
+             mergeMethod = "adjP", mergeCutoff = 0.05,
+             ncores = 7, random.seed = seed, run = TRUE)
 
-print(system.time(trackClusters_all<-trackCluster(pcaDat_dat,type = "tight", random.seed=seed,beta=beta,ncores=ncores)))
-clMat<-mkFullClMat(trackClusters_all)
-write.table(clMat,file="../data/dat_tightTracking_Oct15_filtered.txt",col.names=TRUE,sep="\t",row.names=FALSE)
+# cl <- clusterMany(fq, isCount = TRUE, dimReduce="PCA", nPCADims = 50, alphas = 0.3,
+#                   sequential = TRUE, subsample = TRUE, minSizes = 5,
+#                   clusterFun = c("hierarchical01", "tight"),
+#                   ks = 4:15, random.seed = seed,
+#                   ncores = 7)
+# cl <- combineMany(cl, proportion = .5)
+# cl <- makeDendrogram(cl, dimReduce = "mad", ndims = 1000)
+# plotDendrogram(cl)
+# mergeClusters(cl, mergeMethod = "adjP", cutoff = 0.01)
+# plotClusters(cl)
+
+plotClusters(rsec)
 ```
 
-```{r pullTight}
-if(!evalTight){
-  minSize<-10
-  mkFullClMat<-function(obj,rev=TRUE){ #little function for making clMat from the tightTracking output
-    if(rev) obj$clMat<-rev(obj$clMat)
-    clMat<-do.call("cbind",obj$clMat) 
-	  names(clMat)<-unlist(lapply(names(obj$clMat),function(x){paste(x,gsub("[.]","=",colnames(obj$clMat[[1]])),sep=",")}))
-  	return(clMat)
-  }
+```{r final}
+final_tight <- as.factor(clusterMatrixNamed(rsec)[,2])
+names(final_tight) <- colnames(fq)
 
-  seed<-927501
-  beta<-0.9
-  ncores<-4
+final_merged <- as.factor(primaryClusterNamed(rsec))
+names(final_merged) <- colnames(fq)
 
-  tmp<-read.table("../data/dat_tightTracking_Oct15_filtered.txt",header=TRUE,sep="\t")
-  trackClusters_all<-list()
-  trackClusters_all$clMat<-list("alpha=0.1"=tmp[,1:14],"alpha=0.2"=tmp[,15:28],"alpha=0.3"=tmp[,29:42])
-}
+print(table(final_tight, final_merged))
+
+plotDendrogram(rsec)
+plotCoClustering(rsec, whichClusters = 1:2)
 ```
 
-```{r final, dependson="tightCluster", results="markup"}
-options(expressions=1e5)
-clMat<-mkFullClMat(trackClusters_all,rev=FALSE)[,-c(1, 3)] #remove the 'bad' parameter values. 
-cl<-findSharedClusters(clMat,minSize=5,proportion=0.7)
+```{r visualize}
+wh_rm <- which(final_tight=="-1")
+pca <- prcomp(t(log1p(fq)[,-wh_rm]), scale. = TRUE, center = TRUE)
 
-out<-plotTracking(cbind(Pam=clusters_dat, ChooseFrom=clMat, chip_size, batch_dat))
+cols1 <- c(brewer.pal(8, "Set2"), brewer.pal(8, "Set3"))[-10]
+cols2 <- brewer.pal(9, "Set1")[-6]
+colMerged <- cols2[droplevels(final_merged[-wh_rm])]
+colFinal <- cols1[droplevels(final_tight[-wh_rm])]
 
-print(table(clMat[,13], clusters_dat))
-print(table(clMat[,28], clusters_dat))
-print(table(clMat[,17], clusters_dat))
+plot(pca$x, pch=19, col=colFinal, main="PCA")
+legend("topright", levels(final_tight)[-1], fill=cols1)
+plot(pca$x, pch=19, col=colMerged, main="PCA, merged")
+legend("topright", levels(final_merged)[-1], fill=cols2)
 
-final_tight <- clMat[,17]
-names(final_tight) <- colnames(fq_dat)
+vars <- rowVars(log1p(fq))
+names(vars) <- rownames(fq)
+vars <- sort(vars, decreasing = TRUE)
 
-print(table(final_tight, chip_size))
+tsne_data <- Rtsne(t(log1p(fq)[names(vars)[1:500],-wh_rm]),
+                   max_iter=2000, perplexity = 20)
+plot(tsne_data$Y, pch=19, col=colFinal, main="t-SNE, 500 most variable genes")
+plot(tsne_data$Y, pch=19, col=colMerged, main="t-SNE, 500 most variable genes, merged")
 
-write.table(final_tight,file="../data/dat_tightTracking_Final_Oct15_filtered.txt",row.names=colnames(fq_dat), sep="\t", col.names=FALSE)
-```
-
-```{r merge_clusters, dependson="final", results="markup"}
-## use 1000 most variable genes to merge clusters
-wh_rm <- which(final_tight == -1)
-
-vars <- apply(correctedY_dat[,-wh_rm], 1, var)
-vars <- sort(vars, decreasing=TRUE)
-
-pca_v <- prcomp(t(correctedY_dat[names(vars)[1:1000],]), center = TRUE, scale. = TRUE)
-merged <- clusterCells::mergeClusters(pca_v$x[,1:50], final_tight, mergeMethod = "adjP", plotType="mergeMethod")
-final_merged <- as.factor(merged$cl)
-
-table(final_merged, final_tight)
-colFinal <- c("white", cc[1:10])
-colFinal[colFinal==cc[9]] <- cc[12]
-colMerged <- colFinal[c(1, 10, 8, 3, 9, 11, 5, 2, 7)]
-colMergedNoWhite <- colMerged[-1]
-
-barplot(table(final_tight, final_merged), col=colFinal, main="Merged clusters")
-legend("topright", c("Unassigned", as.character(1:max(final_tight[-wh_rm]))), fill=colFinal)
-
-pairs(pcaDat_dat[-wh_rm,1:3], pch=19, col=colMerged[final_merged[-wh_rm]], main="PCA of normalized counts")
-
-pairs(pca_v$x[-wh_rm,1:3], pch=19, col=colMerged[final_merged[-wh_rm]], main="PCA of normalized counts (1,000 most variable genes)")
-
-write.table(final_merged, file="DAT/cluster_labels_merged.txt", quote=FALSE, sep="\t", row.names=colnames(fq_dat))
-```
-
-
-```{r genesDE,dependson="final"}
-whRm <- wh_rm <- which(final_tight=="-1")
-
-## dendro <- clusterHclust(pcaDat_dat[-whRm,],final_tight[-whRm],full=FALSE)
-
-dendro <- clusterHclust(pca_v$x[-wh_rm,1:npcs], final_tight[-wh_rm], full=FALSE)
-# hGenesTable <- clusterCells::getBestGenes(cl=final_merged[-wh_rm], dat=t(correctedY_dat[,-wh_rm]), dendro=dendro, number=50, type="Dendro", p.value=0.05, returnType ="Table")
-# 
-# pairMat <- t(apply(expand.grid(levels(factor(final_merged[-wh_rm])), levels(factor(final_merged[-wh_rm]))), 1, sort))
-# pairMat <- unique(pairMat)
-# pairMat <- pairMat[-which(pairMat[,1]==pairMat[,2]),]
-# hGenesPairsTable <- clusterCells::getBestGenes(cl=final_merged[-wh_rm], dat=t(correctedY_dat[,-wh_rm]), pairMat=pairMat, number=50, type="Pairs", p.value=0.05, returnType ="Table")
-# 
-# allGenes <- clusterCells::getBestGenes(cl=final_merged[-wh_rm], dat=t(correctedY_dat[,-wh_rm]), type="OneAgainstAll", contrastAdj="All", p.value=0.05, number=50)
-
-hGenesTable <- clusterCells::getBestGenes(cl=final_tight[-wh_rm], dat=t(correctedY_dat[,-wh_rm]), dendro=dendro, number=50, type="Dendro", p.value=0.05, returnType ="Table")
-
-pairMat <- t(apply(expand.grid(levels(factor(final_tight[-wh_rm])), levels(factor(final_tight[-wh_rm]))), 1, sort))
-pairMat <- unique(pairMat)
-pairMat <- pairMat[-which(pairMat[,1]==pairMat[,2]),]
-hGenesPairsTable <- clusterCells::getBestGenes(cl=final_tight[-wh_rm], dat=t(correctedY_dat[,-wh_rm]), pairMat=pairMat, number=50, type="Pairs", p.value=0.05, returnType ="Table")
+plotHeatmap(rsec, whichClusters=1:2, clusterFeaturesData=poscon)
 ```
 
 ```{r heatmap,dependson="genesDE"}
-dendro <- clusterHclust(pca_v$x[,1:npcs], final_tight, full=TRUE, unassigned="outgroup")
-#dendro<-clusterHclust(pcaDat_dat,final_tight,full=TRUE,unassigned="outgroup")
-par(mfrow=c(1,2))
-outDendoHeat<-dualHeatmap(clusterVector=final_tight,heatData=t(fq_dat),clusterData=dendro,clusterSamples=TRUE,whVars=hGenesTable$Index,annCol=data.frame(FinalCluster=as.factor(final_tight),MergedCluster=final_merged, Chip_size=chip_size),main="Genes from Dendrogram Hierarchy",breaks=0.99, annColors=list(FinalCluster=colFinal,MergedCluster=colMerged, Chip_size=cc))
-outPairsHeat<-dualHeatmap(clusterVector=final_tight,heatData=t(fq_dat),clusterData=dendro,clusterSamples=TRUE,whVars=unique(hGenesPairsTable$Index),annCol=data.frame(FinalCluster=as.factor(final_tight),MergedCluster=final_merged, Chip_size=chip_size),main="Genes from All Pairwise",breaks=0.99, annColors=list(FinalCluster=colFinal,MergedCluster=colMerged, Chip_size=cc))
+primaryClusterIndex(rsec) <- 2
+genes <- getBestFeatures(rsec, contrastType = "Pairs", isCount=TRUE)
+head(genes)
 
-pdf("DAT/heatmap_dendro.pdf",width=10,height=25)
-outDendoHeat<-dualHeatmap(clusterVector=final_tight,heatData=t(fq_dat),clusterData=dendro,clusterSamples=TRUE,whVars=hGenesTable$Index,annCol=data.frame(FinalCluster=as.factor(final_tight),MergedCluster=final_merged, Chip_size=chip_size),main="Genes from Dendrogram Hierarchy",breaks=0.99, annColors=list(FinalCluster=colFinal,MergedCluster=colMerged, Chip_size=cc))
-dev.off()
-pdf("DAT/heatmap_pairs.pdf",width=10,height=25)
-outPairsHeat<-dualHeatmap(clusterVector=final_tight,heatData=t(fq_dat),clusterData=dendro,clusterSamples=TRUE,whVars=unique(hGenesPairsTable$Index),annCol=data.frame(FinalCluster=as.factor(final_tight),MergedCluster=final_merged, Chip_size=chip_size),main="Genes from All Pairwise",breaks=0.99, annColors=list(FinalCluster=colFinal,MergedCluster=colMerged, Chip_size=cc))
-dev.off()
-```
+plotHeatmap(rsec, clusterSamplesData = "primaryCluster",
+            clusterFeaturesData=unique(genes[,"IndexInOriginal"]))
 
-```{r heatmap_curated, results="markup", dependson="genesDE"}
-pdf("DAT/heatmap_curated.pdf")
-dualHeatmap(clusterVector=final_tight,heatData=t(fq_dat),clusterData=dendro,clusterSamples=TRUE,whVars=gg,annCol=data.frame(FinalCluster=as.factor(final_tight),PAM=clusters_dat, Batch=batch_dat, Chip_size=chip_size),main="Manually Curated Genes", annColors=list(FinalCluster=colFinal, Chip_size=cc))
-dev.off()
-```
-
-```{r writeGenes,dependson=c("genesDE","heatmap")}
-write.table(hGenesTable[outDendoHeat$heatOut$rowInd,],file="DAT/DEGenes_byDendro_1024.txt",col.names=TRUE,row.names=FALSE,sep="\t",quote=FALSE)
-write.table(hGenesPairsTable[outPairsHeat$heatOut$rowInd,],file="DAT/DEGenes_byPairs_1024.txt",col.names=TRUE,row.names=FALSE,sep="\t",quote=FALSE)
-```
-
-## Visualization
-
-```{r tsne_grey, dependson="final"}
-tsne_data <- read.table("DAT/tsne_all.txt")
-idx <- apply(tsne_data, 1, function(x) max(abs(x))<=200)
-
-colgrey <- rep(rgb(0.86, 0.86, 0.86, 0.5), nrow(tsne_data))
-colgrey[expt=="DAT_EXPT1"] <- c(rgb(0, 0, 0, 0), colFinal[-1])[as.factor(final_tight)]
-
-colgrey2 <- rep(rgb(0.86, 0.86, 0.86, 0.5), nrow(tsne_data))
-colgrey2[expt=="DAT_EXPT1"] <- c(rgb(0, 0, 0, 0), colMerged[-1])[as.factor(final_merged)]
-
-plot(tsne_data[idx,], t='p', main = "tSNE visualization (1,000 most variable genes)", col=colgrey[idx], pch = 19, xlab="Component 1", ylab="Component 2")
-
-pdf("DAT/tsne_all_clusters.pdf")
-plot(tsne_data[idx,], t='p', main = "tSNE visualization (1,000 most variable genes)", col=colgrey[idx], pch = 19, xlab="Component 1", ylab="Component 2")
-dev.off()
-
-pdf("DAT/tsne_all_clusters_merged.pdf")
-plot(tsne_data[idx,], t='p', main = "tSNE visualization (1,000 most variable genes)", col=colgrey2[idx], pch = 19, xlab="Component 1", ylab="Component 2")
-dev.off()
-
-tsne_data <- read.table("DAT/tsne_all_500.txt")
-idx <- apply(tsne_data, 1, function(x) max(abs(x))<=200)
-
-plot(tsne_data[idx,], t='p', main = "tSNE visualization (500 most variable genes)", col=colgrey[idx], pch = 19, xlab="Component 1", ylab="Component 2")
-
-pdf("DAT/tsne_all_500_clusters.pdf")
-plot(tsne_data[idx,], t='p', main = "tSNE visualization (500 most variable genes)", col=colgrey[idx], pch = 19, xlab="Component 1", ylab="Component 2")
-dev.off()
-
-pdf("DAT/tsne_all_500_clusters_merged.pdf")
-plot(tsne_data[idx,], t='p', main = "tSNE visualization (500 most variable genes)", col=colgrey2[idx], pch = 19, xlab="Component 1", ylab="Component 2")
-dev.off()
-
-tsne_data <- read.table("DAT/tsne_all_250.txt")
-idx <- apply(tsne_data, 1, function(x) max(abs(x))<=200)
-
-plot(tsne_data[idx,], t='p', main = "tSNE visualization (250 most variable genes)", col=colgrey[idx], pch = 19, xlab="Component 1", ylab="Component 2")
-
-pdf("DAT/tsne_all_250_clusters.pdf")
-plot(tsne_data[idx,], t='p', main = "tSNE visualization (250 most variable genes)", col=colgrey[idx], pch = 19, xlab="Component 1", ylab="Component 2")
-dev.off()
-
-pdf("DAT/tsne_all_250_clusters_merged.pdf")
-plot(tsne_data[idx,], t='p', main = "tSNE visualization (250 most variable genes)", col=colgrey2[idx], pch = 19, xlab="Component 1", ylab="Component 2")
-dev.off()
-```
-
-```{r pca_dat, dependson="final", results="markup"}
-whRm <- which(final_tight == -1)
-pdf("DAT/pca_tight_clustering.pdf")
-pairs(pca_dat$x[-whRm,1:3], pch=20, col=cc[as.factor(final_tight[-whRm])], main="PCA")
-## legend("bottomright", paste("Cluster", 1:max(final_tight)), fill=cc, cex=.5)
-dev.off()
-
-pdf("DAT/pca_qc_tight_clustering.pdf")
-plot(qcpca_dat$x[-whRm,1:2], pch=20, col=cc[as.factor(final_tight[-whRm])], main="QC")
-legend("bottomright", paste("Cluster", 1:max(final_tight)), fill=cc, cex=.5)
-dev.off()
-
-pdf("DAT/pca_nreads_tight_clustering.pdf")
-plot(qc_dat[-whRm,c(1, 3)], pch=20, col=cc[as.factor(final_tight[-whRm])], main="QC")
-legend("bottomright", paste("Cluster", 1:max(final_tight)), fill=cc, cex=.5)
-dev.off()
-
-## print(cumsum(pca_dat$sdev^2)/sum(pca_dat$sdev^2))
-
-library(scatterplot3d)
-pdf("DAT/pca_3d.pdf")
-scatterplot3d(pca_dat$x[-whRm,1:3], main="3D Scatterplot", color=cc[as.factor(final_tight[-whRm])], pch=20)
-dev.off()
-
-```
-
-```{r tsne, dependson="final"}
-whRm <- which(final_tight == -1)
-vars <- apply(correctedY_dat[,-whRm], 1, var)
-vars <- sort(vars, decreasing=TRUE)
-
-d <- dist(t(correctedY_dat[,-whRm][names(vars)[1:1000],]))
-
-set.seed(123)
-tsne_data <- tsne(d, k = 2, perplexity = 5, max_iter = 2000)
-```
-
-```{r tsne_plot, dependson=c("tsne", "final"), results="markup"}
-idx <- apply(tsne_data, 1, function(x) max(abs(x))<=200)
-
-plot(tsne_data[idx,], t='p', main = "tSNE visualization (1,000 most variable genes)", col=cc[as.factor(final_tight[-whRm][idx])], pch = 19, xlab="Component 1", ylab="Component 2")
-legend("bottomright", paste("Cluster", levels(as.factor(final_tight[-whRm]))), fill=cc, cex=1)
-
-pdf("DAT/tsne.pdf")
-plot(tsne_data[idx,], t='p', main = "tSNE visualization (1,000 most variable genes)", col=cc[as.factor(final_tight[-whRm][idx])], pch = 19, xlab="Component 1", ylab="Component 2")
-legend("topright", paste("Cluster", levels(as.factor(final_tight[-whRm]))), fill=cc, cex=.5)
-dev.off()
-```
-
-```{r tsne_500, dependson="final"}
-whRm <- which(final_tight == -1)
-vars <- apply(correctedY_dat[,-whRm], 1, var)
-vars <- sort(vars, decreasing=TRUE)
-
-d <- dist(t(correctedY_dat[,-whRm][names(vars)[1:500],]))
-
-set.seed(123)
-tsne_data <- tsne(d, k = 2, perplexity = 5, max_iter = 2000)
-```
-
-```{r tsne_plot_500, dependson=c("tsne_500", "final"), results="markup"}
-idx <- apply(tsne_data, 1, function(x) max(abs(x))<=200)
-
-pdf("DAT/tsne_500.pdf")
-plot(tsne_data[idx,], t='p', main = "tSNE visualization (500 most variable genes)", col=cc[as.factor(final_tight[-whRm][idx])], pch = 19, xlab="Component 1", ylab="Component 2")
-legend("topright", paste("Cluster", levels(as.factor(final_tight[-whRm]))), fill=cc, cex=.5)
-dev.off()
-```
-
-```{r tsne_250, dependson="final"}
-whRm <- which(final_tight == -1)
-vars <- apply(correctedY_dat[,-whRm], 1, var)
-vars <- sort(vars, decreasing=TRUE)
-
-d <- dist(t(correctedY_dat[,-whRm][names(vars)[1:250],]))
-
-set.seed(123)
-tsne_data <- tsne(d, k = 2, perplexity = 5, max_iter = 2000)
-```
-
-```{r tsne_plot_250, dependson=c("tsne_250", "final"), results="markup"}
-idx <- apply(tsne_data, 1, function(x) max(abs(x))<=200)
-
-pdf("DAT/tsne_250.pdf")
-plot(tsne_data[idx,], t='p', main = "tSNE visualization (250 most variable genes)", col=cc[as.factor(final_tight[-whRm][idx])], pch = 19, xlab="Component 1", ylab="Component 2")
-legend("topright", paste("Cluster", levels(as.factor(final_tight[-whRm]))), fill=cc, cex=.5)
-dev.off()
-```
-
-# Comparison to Poulin
-
-```{r poulin, dependson="final"}
-poulin1 <- c("Gapdh", "Th", "Slc6a3", "Slc18a2", "Ddc", "Prkcd", "Grin2c", "Sncg", "Ndnf", "Igf1", "Sox6", "Aldh1a1", "Calb1", "Slc17a6", "Cck", "Foxa2", "Lmx1a", "Egr1", "Tacr3", "Grp", "Lpl", "Otx2", "Adcyap1", "Nefm", "Vip", "Chrna6", "Chrna4", "Syt17", "Ntn1", "Slc32a1", "Clstn2", "Zfhx3", "Gsg1l", "Satb1", "Clic5", "Cartpt", "Bmp2", "Kcns3", "Fgf1", "Gad1", "Fzd1", "Lrrk2", "Clic3", "B4galt1", "Aldh2", "Abcc8", "Nrip3", "Park2", "Shh", "Znf746", "Slc6a1", "Kcnj11", "Etv5", "Gucy2c", "Parm1", "Fam184a", "Gpr161", "Pitx3", "Cacna1d", "Lmx1b", "Cacna1c", "Calb2", "En1", "Syt1", "Slc10a4", "En2", "Nr4a2", "Snca", "Sdc2", "Dlk1", "Ntf3", "Vgf", "Cpne2", "Slit2", "Cntnap4", "Pink1", "Grik3", "Drd2", "Foxa1", "Gch1", "Ntsr1", "Grb10", "Efnb3", "Rab3c", "Kcnj6", "Lrrc3b", "Sema6d", "Zdhhc2", "Oxr1", "Bag1", "Marcks", "Clptm1l", "Park7", "Atp13a2")
-poulin1 <- intersect(poulin1, rownames(fq_dat))
-
-pdf("DAT/heatmap_poulin1.pdf")
-dualHeatmap(clusterVector=final_tight,heatData=t(fq_dat),clusterData=dendro,clusterSamples=TRUE,whVars=poulin1,annCol=data.frame(FinalCluster=as.factor(final_tight),PAM=clusters_dat, Batch=batch_dat),main="Manually Curated Genes", annColors=list(FinalCluster=c("white", cc)))
-dev.off()
-
-poulin2 <- c("Sox6", "Sncg", "Ndnf", "Igf1", "Foxa2", "Lmx1a", "Aldh1a1", "Slc32a1", "Satb1", "Clstn2", "Adcyap1", "Lpl", "Otx2", "Vip", "Chrna4", "Gsg1l", "Snca", "Ntf3")
-
-poulin2 <- intersect(poulin2, rownames(fq_dat))
-
-pdf("DAT/heatmap_poulin2.pdf")
-dualHeatmap(clusterVector=final_tight,heatData=t(fq_dat),clusterData=dendro,clusterSamples=TRUE,whVars=poulin2,annCol=data.frame(FinalCluster=as.factor(final_tight),PAM=clusters_dat, Batch=batch_dat),main="Manually Curated Genes", annColors=list(FinalCluster=c("white", cc)))
-dev.off()
-
-```
-
-```{r manual_gene_hm, dependson="genesDE", results="markup", eval=FALSE}
-genes1 <- c("Eif2ak2", "Flna", "Kctd12b", "Id2", "Magt1", "Cflar")
-genes2 <- c("Tac1", "Nxph1", "Arpp21", "Irs4", "Adcyap1", "Rasgrp1", "Ar")
-genes3 <- c("Egr1", "Gas7", "Fstl1", "Cd63", "Sparc", "Lpar1")
-genes4 <- c("Tox", "Spock3", "Pkib", "Calcr", "Rab3b", "Arhgap36")
-genes5 <- c("Ret", "Ntsr1", "Bsn", "Thy1", "Dynll2.1",
-            "Syt1", "Ywhag", "Pink1", "Rnf208", "Megf9", "Gpr153", "Cplx1")
-genes6 <- c("Sparcl1", "Gad2", "Crhbp", "Vcan", "Plcl1")
-genes7 <- c("Ldhb", "Atp2b2", "Anxa1", "Aldh1a7", "Igf1", "Lrrtm4")
-genes8 <- c("Neurod6", "Gkn1", "Grp", "Gpr83", "Lpl", "Atp1b2", "Gabra1", "Tcf4")
-genes9 <- c("Ddah1", "Slc7a3", "Pcp4l1",
-            "Fgf10", "Fam114a1", "Cbln1")
-
-geneord <- c(genes6, genes4, genes5, genes2, genes9, genes7, genes8, genes1, genes3)
-
-groupLength <- c(length(genes6), length(genes4), length(genes5), length(genes2), length(genes9), length(genes7), length(genes8), length(genes1), length(genes3))
-sep <- cumsum(groupLength)
-
-blockColors <- outDendoHeat$annColors$FinalCluster[which(!outDendoHeat$annColors$FinalCluster %in% c("white"))]
-
-dendro<-clusterHclust(pcaDat_dat[-whRm,],final_tight[-whRm],full=TRUE,unassigned="remove")
-
-out<-dualHeatmap(clusterVector=final_tight[-whRm],heatData=t(fq_dat)[geneord,-whRm],clusterData=dendro,clusterSamples=TRUE,clusterVars=TRUE,annCol=data.frame(FinalCluster=final_tight[-whRm]),whVars=1:nrow(fq_dat[geneord,-whRm]),
-annColors=list(FinalCluster=blockColors,Cluster=blockColors),main="Interesting Genes",breaks=0.95,cexRow=1)
-
-#function to add blank lines of NA in data of arbitrary size
-makeBlankData<-function(data,sep,nadd=1){
-  naData<-matrix(NA,nrow=nadd,ncol=ncol(data))
-  colnames(naData)<-colnames(data)
-	start<-c(1,sep+1)
-	end<-c(sep,nrow(data))
-	len<-end-start+1
-	grFac<-rep(1:length(len),times=len)
-	dataList<-by(data,grFac,function(x){x})
-	dataListMinus<-lapply(dataList[-length(dataList)],function(x){
-		return(rbind(x,naData))
-	})
-	rnames<-lapply(dataList,rownames)
-	rnamesMinus<-lapply(head(rnames,-1),function(x){c(x,rep("",nadd))})
-	rnames<-c(unlist(rnamesMinus),rnames[[length(rnames)]])
-	return(list(data=do.call("rbind",c(dataListMinus,dataList[length(dataList)])),rownames=rnames))
-}
-
-names(final_tight) <- colnames(fq_dat)
-cll <- factor(final_tight[-whRm], levels=c(6, 4, 5, 2, 9, 7, 8, 10, 1, 3))
-cl <- sort(cll)
-keep <- names(cl)
-temp <- makeBlankData(fq_dat[geneord,keep],sep=head(sep,-1),nadd=2)
-dat <- temp$data
-rnames <- temp$rownames
-
-cols <- outDendoHeat$annColors$FinalCluster
-colors <- cols[-1][c(6, 4, 5, 2, 9, 7, 8, 10, 1, 3)]
-
-pdf("DAT/manual_genes_heatmap.pdf",width=6,height=6)
-dualHeatmap(clusterVector=cl,heatData=dat,clusterData=dat,clusterSamples=FALSE,clusterVars=FALSE,annCol=data.frame(Cluster=cl),whVars=1:nrow(dat),
-annColors=list(colors),main="",breaks=out$breaks,cexRow=1,
-treeheight=50,labCol=rep("",ncol(dat)),labRow=rnames)
-dev.off()
-
+plotHeatmap(rsec, clusterFeaturesData=unique(genes[,"IndexInOriginal"]))
 ```
