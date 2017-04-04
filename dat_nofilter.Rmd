@@ -11,6 +11,9 @@ output:
     toc_float: yes
 ---
 
+We repeat the analysis without filtering low-quality cells, to see what is the
+impact on normalization and clustering.
+
 ```{r options, include=FALSE}
 knitr::opts_chunk$set(cache=TRUE, error=FALSE, message=FALSE,
                       warning=FALSE, resuts = "hide")
@@ -37,95 +40,17 @@ batch <- droplevels(dat$MD_c1_run_id)
 chip_size <- dat$MD_c1_chip
 ```
 
-# Filtering low-quality cells
-
 ```{r filtering}
 counts <- na.omit(assayData(dat)$counts_table)
 counts <- counts[rowSums(counts)>0,]
 
-num_reads <- quantile(counts[counts > 0])[4]
-num_cells <- 0.25*ncol(counts)
-is_common <- rowSums(counts >= num_reads ) >= num_cells
-table(is_common)
-
-data(housekeeping)
-hk <- intersect(stri_trans_totitle(housekeeping$V1), rownames(counts))
-
-mfilt <- metric_sample_filter(counts,
-                             nreads = qc$NREADS,
-                             ralign = qc$RALIGN,
-                             hard_nreads = 500000,
-                             hard_ralign = 85,
-                             gene_filter = is_common,
-                             pos_controls = rownames(counts) %in% hk,
-                             zcut = 3, mixture = FALSE,
-                             plot = TRUE)
-
-# Mean log10(x+1) expression
-mu_obs <- rowMeans(log10(counts[hk,]+1))
-
-# Assumed False Negatives
-drop_outs <- counts[hk,] == 0
-
-# Logistic Regression Model of Failure
-ref.glms = list()
-for (si in 1:dim(drop_outs)[2]){
-  fit = glm(cbind(drop_outs[,si],1 - drop_outs[,si]) ~ mu_obs,
-            family=binomial(logit))
-  ref.glms[[si]] = fit$coefficients
-}
-
-# Plot Failure Curves and Calculate AUC
-plot(NULL, main = "False Negative Rate Curves",
-     ylim = c(0,1),xlim = c(0,6), 
-     ylab = "Failure Probability", xlab = "Mean log10 Expression")
-x = (0:60)/10
-AUC = NULL
-for(si in 1:ncol(counts)){
-  y = 1/(exp(-ref.glms[[si]][1] - ref.glms[[si]][2] * x) + 1)
-  AUC[si] = sum(y)/10
-  lines(x, 1/(exp(-ref.glms[[si]][1] - ref.glms[[si]][2] * x) + 1),
-        type = 'l', lwd = 2, col = cols[as.numeric(batch)[si]+1])
-}
-
-filtersample = !apply(simplify2array(mfilt[!is.na(mfilt)]), 1, any)
-table(filtersample)
-
-#filtered <- counts[,filtersample]
 filtergenes <- rowSums(counts>10)>=10
 table(filtergenes)
 filtered <- counts[filtergenes,]
 qc <- qc[colnames(filtered),]
-
-pca <- prcomp(t(log1p(filtered)), scale. = TRUE)
-plot(pca$x[,1:2], pch=19, col=cols[as.numeric(filtersample)+1], main="Raw data")
-legend("bottomright", c("low-quality", "high-quality"), fill=cols)
-
-fq <- FQ_FN(filtered)
-pca <- prcomp(t(log1p(fq)), scale. = TRUE)
-plot(pca$x[,1:2], pch=19, col=cols[as.numeric(filtersample)+1], main="FQ data")
-legend("bottomright", c("low-quality", "high-quality"), fill=cols)
-
-qcpca <- prcomp(qc, scale. = TRUE)
-plot(qcpca$x[,1:2], pch=19, col=cols[as.numeric(filtersample)+1], main="QC PCA")
-legend("bottomright", c("low-quality", "high-quality"), fill=cols)
-
-plot(qc[,c(1, 3)], pch=19, col=cols[as.numeric(filtersample)+1])
-legend("bottomright", c("low-quality", "high-quality"), fill=cols)
 ```
 
-For now, I am removing all the low-quality cells. But I'm wondering if we should
-revisit this. Could they be biologically different cell types that express fewer
-genes? This leaves us with `r sum(filtersample)` cells out of `r length(filtersample)`.
-
 ```{r filtered}
-filtered <- counts[,filtersample]
-filtergenes <- rowSums(filtered>10)>=10
-filtered <- filtered[filtergenes,]
-qc <- qc[colnames(filtered),]
-batch <- droplevels(batch[filtersample])
-chip_size <- droplevels(chip_size[filtersample])
-
 pca <- prcomp(t(log1p(filtered)), scale. = TRUE)
 plot(pca$x[,1:2], pch=19, col=cols[batch], main="Raw data")
 
@@ -192,8 +117,6 @@ pc_obj <- prcomp(apply(t(get_scores(scone_res)),1,rank),
 bp_obj <- biplot_color(pc_obj,y = -get_score_ranks(scone_res),expand = .6)
 points(t(bp_obj[1,]), pch = 1, col = "red", cex = 1)
 points(t(bp_obj[1,]), pch = 1, col = "red", cex = 1.5)
-points(t(bp_obj[rownames(bp_obj) == "none,none,no_uv,no_bio,no_batch",]),
-       pch = 1, col = "blue", cex = 1)
 
 if(FALSE) {
   biplot_interactive(scone_res)
@@ -201,14 +124,13 @@ if(FALSE) {
 
 head(get_scores(scone_res))
 
-norm1 <- get_normalized(scone_res, "none,fq2,ruv_k=3,no_bio,batch")
-norm2 <- get_normalized(scone_res, "none,fq,ruv_k=3,no_bio,no_batch")
-norm3 <- get_normalized(scone_res, "none,fq2,no_uv,no_bio,no_batch")
+norm1 <- get_normalized(scone_res, "none,fq,qc_k=4,no_bio,batch")
+norm2 <- get_normalized(scone_res, "none,sum,qc_k=3,no_bio,no_batch")
+norm3 <- get_normalized(scone_res, "none,fq2,qc_k=1,no_bio,no_batch")
 
-plotHeatmap(log1p(norm1[poscon,]), main="none,fq2,ruv_k=3,no_bio,batch")
-plotHeatmap(log1p(norm2[poscon,]), main="none,fq,ruv_k=3,no_bio,no_batch")
-plotHeatmap(log1p(norm3[poscon,]), main="none,fq2,no_uv,no_bio,no_batch")
-
+plotHeatmap(log1p(norm1[poscon,]), main="none,fq,qc_k=4,no_bio,batch")
+plotHeatmap(log1p(norm2[poscon,]), main="none,sum,qc_k=3,no_bio,no_batch")
+plotHeatmap(log1p(norm3[poscon,]), main="none,fq2,qc_k=1,no_bio,no_batch")
 ```
 
 # Clustering
@@ -246,11 +168,6 @@ print(table(final_tight, final_merged))
 
 plotDendrogram(rsec)
 plotCoClustering(rsec, whichClusters = 1:2)
-
-pdf("coclustering.pdf")
-plotCoClustering(rsec, whichClusters = 1:2)
-dev.off()
-
 ```
 
 # Visualization
@@ -282,35 +199,22 @@ plot(tsne_data$Y, pch=19, col=colFinal[-wh_rm], main="t-SNE, 500 most variable g
 plot(tsne_data$Y, pch=19, col=colMerged[-wh_rm], main="t-SNE, 500 most variable genes, merged")
 
 plotHeatmap(rsec, whichClusters=1:2, clusterFeaturesData=poscon)
-
-pdf("tsne.pdf")
-plot(tsne_data$Y, pch=19, col=colFinal[-wh_rm], main="t-SNE, 500 most variable genes")
-dev.off()
-
-pdf("positive_controls.pdf")
-plotHeatmap(rsec, whichClusters=1:2, clusterFeaturesData=poscon)
-dev.off()
-
 ```
 
 # Marker genes
 
 ```{r heatmap}
 primaryClusterIndex(rsec) <- 2
-genes <- getBestFeatures(rsec, contrastType = "Pairs", isCount=TRUE)
+genes <- getBestFeatures(rsec, contrastType = "OneAgainstAll", isCount=TRUE)
 head(genes)
 
-plotHeatmap(rsec, clusterSamplesData = "primaryCluster",
-            clusterFeaturesData=unique(genes[,"IndexInOriginal"]))
-
-plotHeatmap(rsec, clusterFeaturesData=unique(genes[,"IndexInOriginal"]))
-
-pdf("heatmap.pdf")
+pdf("tmp.pdf")
 plotHeatmap(rsec, clusterSamplesData = "primaryCluster",
             clusterFeaturesData=unique(genes[,"IndexInOriginal"]))
 
 plotHeatmap(rsec, clusterFeaturesData=unique(genes[,"IndexInOriginal"]))
 dev.off()
+
 ```
 
 ```{r markers}
@@ -329,9 +233,6 @@ breaks <- unique(c(min(dat, na.rm = TRUE), seq(0, quantile(dat[dat > 0], .99, na
 
 NMF::aheatmap(dat[,order(final_tight)], Rowv=NA, Colv=NA, color = seqPal5, annCol = data.frame(Clusters=sort(final_tight)), annColors = list(Clusters=cols1), breaks=breaks, main="Cluster markers")
 
-pdf("markers.pdf")
-NMF::aheatmap(dat[,order(final_tight)], Rowv=NA, Colv=NA, color = seqPal5, annCol = data.frame(Clusters=sort(final_tight)), annColors = list(Clusters=cols1), breaks=breaks, main="Cluster markers")
-dev.off()
 
 linnarson <- list(SNC_VTA1=c("Epha4", "Chrna5", "Nrip3", "Kcns3", "Cplx1", "Sox6", "Ndnf"),
                   Not_SNC=c("Kifc3", "Calb1", "Chst8"),
