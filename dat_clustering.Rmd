@@ -89,6 +89,7 @@ for(si in 1:ncol(counts)){
 }
 
 filtersample = !apply(simplify2array(mfilt[!is.na(mfilt)]), 1, any)
+table(filtersample)
 
 #filtered <- counts[,filtersample]
 filtergenes <- rowSums(counts>10)>=10
@@ -115,7 +116,7 @@ legend("bottomright", c("low-quality", "high-quality"), fill=cols)
 
 For now, I am removing all the low-quality cells. But I'm wondering if we should
 revisit this. Could they be biologically different cell types that express fewer
-genes?
+genes? This leaves us with `r sum(filtersample)` cells out of `r length(filtersample)`.
 
 ```{r filtered}
 filtered <- counts[,filtersample]
@@ -135,33 +136,79 @@ plot(pca$x[,1:2], pch=19, col=cols[batch], main="FQ data")
 qcpca <- prcomp(qc, scale. = TRUE)
 plot(qcpca$x[,1:2], pch=19, col=cols[batch], main="QC PCA")
 
-plot(qc[,c(1, 3)], pch=19, col=cols[batch])
+plot(qc[,c(1, 3)], pch=19, col=cols[batch], main="QC")
 ```
 
 # Normalization
 
-Here, we normalize the samples by removing the batch effects and the first two QC PCs,
-after FQ normalization.
+Here, we use `scone` to normalize the samples. We use housekeeping genes as negative control genes and a collection of positive controls from Poulin and Linnarson.
 
-
-```{r norm}
-Y <- t(log1p(fq))
-W <- model.matrix(~batch)
-alpha <- solve(t(W) %*% W) %*% t(W) %*% Y
-correctedY <- t(Y - W %*% alpha)
-#correctedY[correctedY<0] <- 0
-pca_dat <- prcomp(t(correctedY), center=TRUE, scale=TRUE)
-
-plot(pca_dat$x, pch=19, col=cols[batch])
-
+```{r controls}
 ## Positive controls: genes found DE between 6 DA neuron subtypes by Poulin et al
 poulin <- c("Sox6", "Sncg", "Ndnf", "Igf1", "Foxa2", "Lmx1a", "Aldh1a1", "Slc32a1", "Satb1", "Clstn2", "Adcyap1", "Lpl", "Otx2", "Vip", "Chrna4", "Gsg1l", "Snca", "Ntf3")
 
 linnarson <- c("Epha4", "Chrna5", "Nrip3", "Kcns3", "Cplx1", "Sox6", "Ndnf", "Kifc3", "Calb1", "Chst8", "Aldh1a1", "Igfbp2", "Lama5", "Anxa1", "Rpb4", "Aldh1a7", "Adcyap1", "Lhfpl2", "Cbln4", "Lpl", "Nhlh2", "Otx1", "Syn2", "Cbln1", "Gpx3", "Fjx1", "Foxa2", "En2", "Ntf3", "Gfra2", "Lix1", "Ptpn5", "Fgf1", "Nostrin", "Serpine2", "Kcnip3", "Grik1", "Lypd1", "Pou3f1", "Cd9", "Otx2", "Neurod6", "Grp", "Tcf12", "Calca", "Gpr83", "Vip", "Cck", "Cnr1", "Nphp1", "Chtf8", "Slc32a1", "Ctxn3", "Etv1", "Lmx1a")
 poscon <- intersect(c(poulin, linnarson), rownames(fq))
 
-plotHeatmap(log1p(fq[poscon,]))
-plotHeatmap(correctedY[poscon,])
+## Negative controls
+data(housekeeping)
+hk <- intersect(rownames(fq), stri_trans_totitle(housekeeping[,1]))
+
+plotHeatmap(log1p(fq[poscon,]), main="Positive controls")
+plotHeatmap(log1p(fq[hk,]), main="Negative controls")
+```
+
+```{r scone}
+set.seed(474)
+negcon_ruv <- sample(hk, round(length(hk)/2))
+negcon_eval <- setdiff(hk, negcon_ruv)
+
+SUM_FN = function (ei)
+{
+  sums = colSums(ei)
+  eo = t(t(ei)*mean(sums)/sums)
+  return(eo)
+}
+
+scale_funs <- list(none=identity, # Identity - do nothing
+             sum = SUM_FN,  # User-defined functions
+             tmm = TMM_FN, # SCONE library wrappers...
+             fq = FQT_FN,
+             fq2 = FQ_FN)
+
+scone_obj <- SconeExperiment(filtered, qc=qc, batch=batch,
+                             negcon_ruv = rownames(filtered) %in% negcon_ruv,
+                             negcon_eval = rownames(filtered) %in% negcon_eval,
+                             poscon = rownames(filtered) %in% poscon)
+scone_res <- scone(scone_obj, zero="postadjust", scaling=scale_funs,
+                   adjust_batch="yes", adjust_bio="no",
+                   bpparam=BiocParallel::MulticoreParam(7))
+```
+
+
+```{r scone_plots}
+pc_obj <- prcomp(apply(t(get_scores(scone_res)),1,rank),
+                center = TRUE,scale = FALSE)
+bp_obj <- biplot_color(pc_obj,y = -get_score_ranks(scone_res),expand = .6)
+points(t(bp_obj[1,]), pch = 1, col = "red", cex = 1)
+points(t(bp_obj[1,]), pch = 1, col = "red", cex = 1.5)
+points(t(bp_obj[rownames(bp_obj) == "none,none,no_uv,no_bio,no_batch",]),
+       pch = 1, col = "blue", cex = 1)
+
+if(FALSE) {
+  biplot_interactive(scone_res)
+}
+
+head(get_scores(scone_res))
+
+norm1 <- get_normalized(scone_res, "none,fq2,ruv_k=3,no_bio,batch")
+norm2 <- get_normalized(scone_res, "none,fq,ruv_k=3,no_bio,no_batch")
+norm3 <- get_normalized(scone_res, "none,fq2,no_uv,no_bio,no_batch")
+
+plotHeatmap(log1p(norm1[poscon,]), main="none,fq2,ruv_k=3,no_bio,batch")
+plotHeatmap(log1p(norm2[poscon,]), main="none,fq,ruv_k=3,no_bio,no_batch")
+plotHeatmap(log1p(norm3[poscon,]), main="none,fq2,no_uv,no_bio,no_batch")
+
 ```
 
 # Clustering
@@ -169,12 +216,12 @@ plotHeatmap(correctedY[poscon,])
 ```{r tightcluster}
 seed <- 927501
 
-rsec <- RSEC(fq, isCount = TRUE, minSizes = 5, alphas = 0.3,
+rsec <- RSEC(norm3, isCount = TRUE, minSizes = 5, alphas = 0.3,
              combineProportion = 0.5,
              mergeMethod = "adjP", mergeCutoff = 0.05,
              ncores = 7, random.seed = seed, run = TRUE)
 
-# cl <- clusterMany(fq, isCount = TRUE, dimReduce="PCA", nPCADims = 50, alphas = 0.3,
+# cl <- clusterMany(norm3, isCount = TRUE, dimReduce="PCA", nPCADims = 50, alphas = 0.3,
 #                   sequential = TRUE, subsample = TRUE, minSizes = 5,
 #                   clusterFun = c("hierarchical01", "tight"),
 #                   ks = 4:15, random.seed = seed,
@@ -182,17 +229,17 @@ rsec <- RSEC(fq, isCount = TRUE, minSizes = 5, alphas = 0.3,
 # cl <- combineMany(cl, proportion = .5)
 # cl <- makeDendrogram(cl, dimReduce = "mad", ndims = 1000)
 # plotDendrogram(cl)
-# mergeClusters(cl, mergeMethod = "adjP", cutoff = 0.01)
+# cl <- mergeClusters(cl, mergeMethod = "adjP", cutoff = 0.05)
 # plotClusters(cl)
 
 plotClusters(rsec)
 ```
 
 ```{r final}
-final_tight <- as.factor(clusterMatrixNamed(rsec)[,2])
+final_tight <- factor(clusterMatrixNamed(rsec)[,2], levels=clusterLegend(rsec)[[2]][, "name"])
 names(final_tight) <- colnames(fq)
 
-final_merged <- as.factor(primaryClusterNamed(rsec))
+final_merged <- factor(primaryClusterNamed(rsec), levels=clusterLegend(rsec)[[1]][, "name"])
 names(final_merged) <- colnames(fq)
 
 print(table(final_tight, final_merged))
@@ -201,33 +248,40 @@ plotDendrogram(rsec)
 plotCoClustering(rsec, whichClusters = 1:2)
 ```
 
+# Visualization
+
 ```{r visualize}
 wh_rm <- which(final_tight=="-1")
-pca <- prcomp(t(log1p(fq)[,-wh_rm]), scale. = TRUE, center = TRUE)
+pca <- prcomp(t(log1p(norm3)[,-wh_rm]), scale. = TRUE, center = TRUE)
 
-cols1 <- c(brewer.pal(8, "Set2"), brewer.pal(8, "Set3"))[-10]
-cols2 <- brewer.pal(9, "Set1")[-6]
-colMerged <- cols2[droplevels(final_merged[-wh_rm])]
-colFinal <- cols1[droplevels(final_tight[-wh_rm])]
+cols1 <- clusterLegend(rsec)[[2]][, "color"]
+names(cols1) <- clusterLegend(rsec)[[2]][, "name"]
+cols2 <- clusterLegend(rsec)[[1]][, "color"]
+names(cols2) <- clusterLegend(rsec)[[1]][, "name"]
 
-plot(pca$x, pch=19, col=colFinal, main="PCA")
-legend("topright", levels(final_tight)[-1], fill=cols1)
-plot(pca$x, pch=19, col=colMerged, main="PCA, merged")
-legend("topright", levels(final_merged)[-1], fill=cols2)
+colFinal <- cols1[final_tight]
+colMerged <- cols2[final_merged]
 
-vars <- rowVars(log1p(fq))
-names(vars) <- rownames(fq)
+plot(pca$x, pch=19, col=colFinal[-wh_rm], main="PCA")
+legend("topright", levels(final_tight), fill=cols1[levels(final_tight)])
+plot(pca$x, pch=19, col=colMerged[-wh_rm], main="PCA, merged")
+legend("topright", levels(final_merged), fill=cols2[levels(final_merged)])
+
+vars <- rowVars(log1p(norm1))
+names(vars) <- rownames(norm1)
 vars <- sort(vars, decreasing = TRUE)
 
-tsne_data <- Rtsne(t(log1p(fq)[names(vars)[1:500],-wh_rm]),
-                   max_iter=2000, perplexity = 20)
-plot(tsne_data$Y, pch=19, col=colFinal, main="t-SNE, 500 most variable genes")
-plot(tsne_data$Y, pch=19, col=colMerged, main="t-SNE, 500 most variable genes, merged")
+tsne_data <- Rtsne(t(log1p(norm3)[names(vars)[1:500],-wh_rm]),
+                   max_iter=5000, perplexity = 10)
+plot(tsne_data$Y, pch=19, col=colFinal[-wh_rm], main="t-SNE, 500 most variable genes")
+plot(tsne_data$Y, pch=19, col=colMerged[-wh_rm], main="t-SNE, 500 most variable genes, merged")
 
 plotHeatmap(rsec, whichClusters=1:2, clusterFeaturesData=poscon)
 ```
 
-```{r heatmap,dependson="genesDE"}
+# Marker genes
+
+```{r heatmap}
 primaryClusterIndex(rsec) <- 2
 genes <- getBestFeatures(rsec, contrastType = "Pairs", isCount=TRUE)
 head(genes)
@@ -236,4 +290,51 @@ plotHeatmap(rsec, clusterSamplesData = "primaryCluster",
             clusterFeaturesData=unique(genes[,"IndexInOriginal"]))
 
 plotHeatmap(rsec, clusterFeaturesData=unique(genes[,"IndexInOriginal"]))
+
+```
+
+```{r markers}
+markers <- list(Set1=c("Erbb4", "Pcsk1", "Pepd", "Pdp2", "Nubp2", "Pik3c3", "Cacna2d3", "Kcns3", "Chrna3", "Epha4"),
+                Set2=c("Adamts2", "Arpp21", "Rasgrp1", "Pitx2", "Irx6", "Cd36", "Pgr15l", "Gda", "Nos1", "Tac1"),
+                Set3=c("Gad2", "Rasgrf1", "Satb2", "Fam159b", "Otof", "Msn", "Six6", "Gad1", "Ecel1", "Calcr"),
+                Set4=c("Cnr1", "Cbln4", "Lpl", "Gpr83", "Neurod6", "Gkn1", "Igfbp4", "Prdm8", "Nxph3", "Tiam2")
+)
+markers <-lapply(markers, function(x) which(rownames(rsec) %in% x))
+blank_data <- makeBlankData(transform(rsec), markers)
+
+dat <- as.matrix(blank_data$dataWBlanks)
+rnames <- blank_data$rowNamesWBlanks
+rownames(dat) <- rnames
+breaks <- unique(c(min(dat, na.rm = TRUE), seq(0, quantile(dat[dat > 0], .99, na.rm = TRUE), length = 50), max(dat, na.rm = TRUE)))
+
+NMF::aheatmap(dat[,order(final_tight)], Rowv=NA, Colv=NA, color = seqPal5, annCol = data.frame(Clusters=sort(final_tight)), annColors = list(Clusters=cols1), breaks=breaks, main="Cluster markers")
+
+
+linnarson <- list(SNC_VTA1=c("Epha4", "Chrna5", "Nrip3", "Kcns3", "Cplx1", "Sox6", "Ndnf"),
+                  Not_SNC=c("Kifc3", "Calb1", "Chst8"),
+                  SNC_VTA2=c("Aldh1a1", "Igfbp2", "Lama5", "Anxa1", "Rpb4", "Aldh1a7"),
+                  VTA2_VTA3=c("Adcyap1", "Lhfpl2", "Cbln4", "Lpl", "Nhlh2", "Otx1"),
+                  VTA3_VTA4=c("Syn2", "Cbln1", "Gpx3"),
+                  VTA1_VTA3=c("Fjx1", "Foxa2", "En2", "Ntf3", "Gfra2"),
+                  SNC=c("Lix1", "Ptpn5", "Fgf1", "Nostrin", "Serpine2", "Kcnip3", "Grik1"),
+                  VTA1=c("Lypd1", "Pou3f1", "Cd9"),
+                  VTA2=c("Otx2", "Neurod6", "Grp", "Tcf12", "Calca", "Gpr83"),
+                  VTA3=c("Vip", "Cck", "Cnr1", "Nphp1", "Chtf8"),
+                  VTA4=c("Slc32a1", "Ctxn3", "Etv1", "Lmx1a"))
+markers <-lapply(linnarson, function(x) which(rownames(rsec) %in% x))
+blank_data <- makeBlankData(transform(rsec), markers)
+
+dat <- as.matrix(blank_data$dataWBlanks)
+rnames <- blank_data$rowNamesWBlanks
+rownames(dat) <- rnames
+breaks <- unique(c(min(dat, na.rm = TRUE), seq(0, quantile(dat[dat > 0], .99, na.rm = TRUE), length = 50), max(dat, na.rm = TRUE)))
+
+NMF::aheatmap(dat[,order(final_tight)], Rowv=NA, Colv=NA, color = seqPal5, annCol = data.frame(Clusters=sort(final_tight)), annColors = list(Clusters=cols1), breaks=breaks, main="Linnarson markers")
+```
+
+From the last heatmap, we can see that there is correspondence between our clusters
+and Linnarson's clusters.
+
+```{r info}
+sessionInfo()
 ```
