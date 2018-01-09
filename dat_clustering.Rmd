@@ -9,6 +9,8 @@ output:
     toc: yes
     code_folding: hide
     toc_float: yes
+editor_options: 
+  chunk_output_type: console
 ---
 
 ```{r options, include=FALSE}
@@ -25,7 +27,7 @@ library(matrixStats)
 cols <- c(brewer.pal(9, "Set1"))
 
 options(getClass.msg=FALSE)
-NMF::nmf.options(grid.patch=TRUE)
+#NMF::nmf.options(grid.patch=TRUE)
 ```
 
 ```{r datain}
@@ -276,21 +278,113 @@ vars <- rowVars(log1p(norm3))
 names(vars) <- rownames(norm3)
 vars <- sort(vars, decreasing = TRUE)
 
-tsne_data <- Rtsne(t(log1p(norm3)[names(vars)[1:500],-wh_rm]),
+tsne_500 <- Rtsne(t(log1p(norm3)[names(vars)[1:500],-wh_rm]),
                    max_iter=5000, perplexity = 10)
-plot(tsne_data$Y, pch=19, col=colFinal[-wh_rm], main="t-SNE, 500 most variable genes")
-plot(tsne_data$Y, pch=19, col=colMerged[-wh_rm], main="t-SNE, 500 most variable genes, merged")
+plot(tsne_500$Y, pch=19, col=colFinal[-wh_rm], main="t-SNE, 500 most variable genes")
+plot(tsne_500$Y, pch=19, col=colMerged[-wh_rm], main="t-SNE, 500 most variable genes, merged")
+
+tsne_250 <- Rtsne(t(log1p(norm3)[names(vars)[1:250],-wh_rm]),
+                   max_iter=5000, perplexity = 10)
+plot(tsne_250$Y, pch=19, col=colFinal[-wh_rm], main="t-SNE, 250 most variable genes")
+plot(tsne_250$Y, pch=19, col=colMerged[-wh_rm], main="t-SNE, 250 most variable genes, merged")
+
+tsne_1000 <- Rtsne(t(log1p(norm3)[names(vars)[1:1000],-wh_rm]),
+                   max_iter=5000, perplexity = 10)
+plot(tsne_1000$Y, pch=19, col=colFinal[-wh_rm], main="t-SNE, 1,000 most variable genes")
+plot(tsne_1000$Y, pch=19, col=colMerged[-wh_rm], main="t-SNE, 1,000 most variable genes, merged")
+
+tsne_all <- Rtsne(t(log1p(norm3)[,-wh_rm]),
+                   max_iter=5000, perplexity = 10)
+plot(tsne_all$Y, pch=19, col=colFinal[-wh_rm], main="t-SNE, All genes")
+plot(tsne_all$Y, pch=19, col=colMerged[-wh_rm], main="t-SNE, All genes, merged")
 
 plotHeatmap(rsec, whichClusters=1:2, clusterFeaturesData=poscon)
 
-pdf("tsne.pdf")
-plot(tsne_data$Y, pch=19, col=colFinal[-wh_rm], main="t-SNE, 500 most variable genes")
+pdf("tsne_500.pdf")
+plot(tsne_500$Y, pch=19, col=colFinal[-wh_rm], main="t-SNE, 500 most variable genes")
+dev.off()
+
+pdf("tsne_250.pdf")
+plot(tsne_250$Y, pch=19, col=colFinal[-wh_rm], main="t-SNE, 250 most variable genes")
+dev.off()
+
+pdf("tsne_1000.pdf")
+plot(tsne_1000$Y, pch=19, col=colFinal[-wh_rm], main="t-SNE, 1,000 most variable genes")
+dev.off()
+
+pdf("tsne_all.pdf")
+plot(tsne_all$Y, pch=19, col=colFinal[-wh_rm], main="t-SNE, All genes")
 dev.off()
 
 pdf("positive_controls.pdf")
 plotHeatmap(rsec, whichClusters=1:2, clusterFeaturesData=poscon)
 dev.off()
 
+```
+
+```{r zinb}
+run_zinb <- FALSE
+if(run_zinb) {
+  library(zinbwave)
+  library(BiocParallel)
+  library(doParallel)
+  registerDoParallel(6)
+  register(DoparParam())
+  
+  system.time(zinb <- zinbFit(filtered[,-wh_rm], K=10))
+  save(zinb, file = "zinb_res.rda")
+} else {
+  load("zinb_res.rda")  
+}
+
+plot(zinb@W, pch=19, col=colFinal[-wh_rm], main="ZINB")
+tsne_zinb <- Rtsne(zinb@W, pca = FALSE,
+                   max_iter=5000, perplexity = 20)
+
+plot(tsne_zinb$Y, pch=19, col=colFinal[-wh_rm], main="t-SNE, after ZINB",
+     xlab = "Dimension 1", ylab = "Dimension 2")
+
+pdf("tsne_zinb_all.pdf")
+plot(tsne_zinb$Y, pch=19, col=colFinal[-wh_rm], main="t-SNE, after ZINB",
+     xlab = "Dimension 1", ylab = "Dimension 2")
+dev.off()
+```
+
+```{r alt, eval=FALSE}
+library(Seurat)
+pbmc <- CreateSeuratObject(raw.data = filtered, min.cells = 1, min.genes = 1, 
+    project = "10X_PBMC")
+
+## Build SNN
+k.param = 10
+k.scale = 10
+data.use <- getW(zinb)
+n.cells = NROW(data.use)
+my.knn <- FNN::get.knn(as.matrix(data.use), k = min(k.scale * k.param, n.cells - 1))
+nn.ranked <- cbind(1:n.cells, my.knn$nn.index[, 1:(k.param-1)])
+nn.large <- my.knn$nn.index
+
+w <- Seurat:::CalcSNNSparse(cell.names = colnames(filtered[,-wh_rm]),
+                            k.param = k.param,
+                            nn.large = nn.large,
+                            nn.ranked = nn.ranked,
+                            prune.SNN = 1/15,
+                            print.output = FALSE)
+
+pbmc@snn <- w
+
+## Run modularity clustering
+resolution <- 0.4
+pbmc <- Seurat:::RunModularityClustering(object = pbmc, SNN = w, 
+                                         modularity = 1, resolution = resolution,
+                                         algorithm = 1, n.start = 100, 
+                                         n.iter = 10, random.seed = 0,
+                                         print.output = FALSE, temp.file.location = NULL)
+pbmc <- Seurat:::GroupSingletons(pbmc, pbmc@snn)
+name <- paste("res.", resolution, sep = "")
+pbmc <- StashIdent(pbmc, name)
+
+z_cl <- pbmc@ident
 ```
 
 # Marker genes
@@ -311,6 +405,41 @@ plotHeatmap(rsec, clusterSamplesData = "primaryCluster",
 
 plotHeatmap(rsec, clusterFeaturesData=unique(genes[,"IndexInOriginal"]))
 dev.off()
+
+genes_1vall <- getBestFeatures(rsec, contrastType = "OneAgainstAll", isCount=TRUE,
+                               number=50)
+
+plotHeatmap(rsec, clusterSamplesData = "primaryCluster",
+            clusterFeaturesData=unique(genes_1vall[,"IndexInOriginal"]))
+
+plotHeatmap(rsec, clusterFeaturesData=unique(genes_1vall[,"IndexInOriginal"]))
+
+pdf("heatmap_1vall.pdf")
+plotHeatmap(rsec, clusterSamplesData = "primaryCluster",
+            clusterFeaturesData=unique(genes_1vall[,"IndexInOriginal"]))
+
+plotHeatmap(rsec, clusterFeaturesData=unique(genes_1vall[,"IndexInOriginal"]))
+dev.off()
+
+genes_dendro <- getBestFeatures(rsec, contrastType = "Dendro", isCount=TRUE,
+                               number=50)
+
+plotHeatmap(rsec, clusterSamplesData = "primaryCluster",
+            clusterFeaturesData=unique(genes_dendro[,"IndexInOriginal"]))
+
+plotHeatmap(rsec, clusterFeaturesData=unique(genes_dendro[,"IndexInOriginal"]))
+
+pdf("heatmap_dendro.pdf")
+plotHeatmap(rsec, clusterSamplesData = "primaryCluster",
+            clusterFeaturesData=unique(genes_dendro[,"IndexInOriginal"]))
+
+plotHeatmap(rsec, clusterFeaturesData=unique(genes_dendro[,"IndexInOriginal"]))
+dev.off()
+
+```
+
+```{r save_markers}
+write.table(genes, file="dat_cluster_markers.txt", sep='\t', quote=FALSE)
 ```
 
 ```{r markers}
@@ -357,6 +486,148 @@ NMF::aheatmap(dat[,order(final_tight)], Rowv=NA, Colv=NA, color = seqPal5, annCo
 
 From the last heatmap, we can see that there is correspondence between our clusters
 and Linnarson's clusters.
+
+```{r markers2}
+markers <- c("Neurod6", "Grp", "Cnr1", "Gpr83", "Tcf12", "Gkn1", "Igfbp4", "Otx2", "Nxph3", "Calca")
+
+table(primaryClusterNamed(rsec))
+idx <- order(tapply(transform(rsec)["Neurod6",], primaryClusterNamed(rsec), mean), decreasing = TRUE)
+cl <- factor(primaryClusterNamed(rsec),
+             levels=levels(as.factor(primaryClusterNamed(rsec)))[idx])
+
+orderSamples(rsec) <- order(transform(rsec)["Neurod6",], decreasing = TRUE)
+plotHeatmap(rsec, clusterFeaturesData=markers,
+            clusterSamplesData = "orderSamplesValue")
+
+pdf("markers_Neurod6.pdf")
+plotHeatmap(rsec, clusterFeaturesData=markers,
+            clusterSamplesData = "orderSamplesValue")
+dev.off()
+
+pdf("markers_opt1.pdf")
+plotHeatmap(rsec, clusterFeaturesData=markers, clusterFeatures = FALSE,
+            clusterSamplesData = "orderSamplesValue")
+dev.off()
+
+pdf("markers_opt3.pdf")
+plotHeatmap(rsec, clusterFeaturesData=markers, clusterFeatures = FALSE,
+            clusterSamplesData = "dendrogramValue")
+dev.off()
+
+idx <- order(tapply(transform(rsec)["Grp",], primaryClusterNamed(rsec), mean), decreasing = TRUE)
+cl <- factor(primaryClusterNamed(rsec),
+             levels=levels(as.factor(primaryClusterNamed(rsec)))[idx])
+
+orderSamples(rsec) <- order(transform(rsec)["Grp",], decreasing = TRUE)
+
+markers <- c("Grp", "Neurod6", "Cnr1", "Gpr83", "Tcf12", "Gkn1", "Igfbp4", "Otx2", "Nxph3", "Calca")
+
+pdf("markers_opt2.pdf")
+plotHeatmap(rsec, clusterFeaturesData=markers, clusterFeatures = FALSE,
+            clusterSamplesData = "orderSamplesValue")
+dev.off()
+
+pdf("markers_opt4.pdf")
+plotHeatmap(rsec, clusterFeaturesData=markers, clusterFeatures = FALSE,
+            clusterSamplesData = "dendrogramValue")
+dev.off()
+
+```
+
+## Sex
+
+```{r sex}
+dat <- sf.sc.eSet[,sf.sc.eSet$MD_expt_condition == "DAT_EXPT1"]
+sex <- dat$MD_sex
+names(sex) <- colnames(dat)
+sex <- sex[colnames(rsec)]
+colData(rsec)$sex <- sex
+
+age <- dat$MD_age
+names(age) <- colnames(dat)
+age <- age[colnames(rsec)]
+colData(rsec)$age <- age
+
+pdf("markers_opt4_sex.pdf")
+plotHeatmap(rsec, clusterFeaturesData=markers, clusterFeatures = FALSE,
+            clusterSamplesData = "dendrogramValue",
+            sampleData = "sex")
+dev.off()
+
+rsec@merge_index <- NA_integer_
+rsec@merge_cutoff <- NA_integer_
+rsec@merge_dendrocluster_index <- NA_integer_
+rsec@merge_nodeMerge <- NULL
+rsec@merge_nodeProp <- NULL
+rsec@merge_method <- NA_character_
+rsec@dendro_outbranch <- TRUE
+
+plotDendrogram(rsec)
+
+pdf("coclustering_sex.pdf")
+plotCoClustering(rsec, whichClusters = "combineMany", sampleData = c("sex"))
+dev.off()
+
+pdf("coclustering_sex_age.pdf")
+plotCoClustering(rsec, whichClusters = "combineMany", sampleData = c("sex", "age"))
+dev.off()
+
+```
+
+```{r de}
+x <- as.factor(sex)
+
+design <- model.matrix(~x)
+colnames(design) <- c("Intercept", "male")
+
+counts <- round(assay(rsec))
+
+library(edgeR)
+y <- DGEList(counts)
+y <- calcNormFactors(y)
+y <- estimateDisp(y, design)
+fit <- glmFit(y, design = design)
+lrt <- glmLRT(fit, coef = 2)
+top <- topTags(lrt, n = Inf)$table
+```
+
+```{r de_visual}
+head(top)
+table(top$FDR<=0.05)
+hist(top$PValue)
+
+de <- rownames(top)[top$FDR <= 0.05]
+
+idx <- c("Neurod6", "Grp") 
+idx %in% de
+
+top[idx,]
+
+pdf("volcano_de_genes_sex.pdf")
+plot(top$logFC, -log10(top$PValue), col="grey", pch=19, xlab="LogFC (M vs F)",
+     ylab = "-log10(PValue)")
+points(top[idx, "logFC"], -log10(top[idx, "PValue"]), col=2, lwd=2)
+text(top[idx[1], "logFC"] + .3, -log10(top[idx[1], "PValue"]) + 3,
+     labels = idx[1])
+text(top[idx[2], "logFC"] - .3, -log10(top[idx[2], "PValue"]) + 3,
+     labels = idx[2])
+text(top[de[1:4], "logFC"] - 1, -log10(top[de[1:4], "PValue"]),
+     labels = de[1:4])
+dev.off()
+
+pdf("heatmap_de_genes_sex.pdf")
+plotHeatmap(rsec, clusterSamplesData = "hclust",
+            sampleData = c("sex"),
+            clusterFeaturesData=which(rownames(rsec) %in% de), breaks=.99)
+dev.off()
+
+pdf("heatmap_sex.pdf")
+plotHeatmap(rsec, clusterSamplesData = "primaryCluster",
+            clusterFeaturesData=unique(genes[,"IndexInOriginal"]),
+            sampleData = "sex")
+dev.off()
+
+```
 
 ```{r info}
 sessionInfo()
